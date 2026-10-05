@@ -20,10 +20,11 @@
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
-    <ProjectGuid>{3D772048-7D45-4892-AA6B-FBB3896C371A}</ProjectGuid>
+    <ProjectGuid>{42E8D17F-9B99-4ACB-B680-2198E79E2912}</ProjectGuid>
     <Keyword>MFCProj</Keyword>
-    <RootNamespace>Task02</RootNamespace>
+    <RootNamespace>ChatApp</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>ChatAppClient</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -183,35 +184,31 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="CLoginDlg.h" />
-    <ClInclude Include="CRegisterDlg.h" />
+    <ClInclude Include="ChatApp.h" />
+    <ClInclude Include="ChatAppDlg.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
-    <ClInclude Include="Task02.h" />
-    <ClInclude Include="Task02Dlg.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="CLoginDlg.cpp" />
-    <ClCompile Include="CRegisterDlg.cpp" />
+    <ClCompile Include="ChatApp.cpp" />
+    <ClCompile Include="ChatAppDlg.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="Task02.cpp" />
-    <ClCompile Include="Task02Dlg.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Task02.rc" />
+    <ResourceCompile Include="ChatApp.rc" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\Task02.rc2" />
+    <None Include="res\ChatApp.rc2" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="res\Task02.ico" />
+    <Image Include="res\ChatApp.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

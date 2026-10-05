@@ -5,6 +5,7 @@
 #include "Task02.h"
 #include "CLoginDlg.h"
 #include "afxdialogex.h"
+#include "CRegisterDlg.h"
 
 
 // CLoginDlg dialog
@@ -85,12 +86,24 @@ void CLoginDlg::OnBnClickedButtonLogin()
 
 void CLoginDlg::OnBnClickedButtonRegister()
 {
-    CString username, password;
-    if (!ReadInput(username, password)) {
+    CRegisterDlg dlg;
+    if (dlg.DoModal() != IDOK)
+        return;
+     SetDlgItemText(
+        IDC_EDIT_USERNAME,
+        dlg.m_username
+    );
+
+    SetDlgItemText(
+        IDC_EDIT_PASSWORD,
+        dlg.m_password
+    );
+    if (!ReadInput(dlg.m_username, dlg.m_password)) {
         return;
     }
-    m_accounts[username] = password;
+    m_accounts[dlg.m_username] = dlg.m_password;
     MessageBoxW(L"Đăng ký thành công bấm đăng nhập để tiếp tục!", L"Thành công", MB_OK | MB_ICONINFORMATION);
+   
 }
 
 
