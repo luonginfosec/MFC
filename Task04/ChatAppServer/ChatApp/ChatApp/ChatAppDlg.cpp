@@ -235,7 +235,7 @@ bool CChatAppDlg::ParseMessages()
         u_long header = 0;
         memcpy(&header, m_received.data() + offset, 4);
         u_long length = ntohl(header);
-        if (length == 0 || length > INT_MAX - 1)
+        if (length == 0 || length > INT_MAX - 1 || length % sizeof(wchar_t) != 0)
         {
             Stop(L"Độ dài tin nhắn không hợp lệ.");
             return false;
@@ -243,15 +243,10 @@ bool CChatAppDlg::ParseMessages()
         if (m_received.size() - offset - 4 < length)
             break;
         const char* data = m_received.data() + offset + 4;
-        int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, (int)length, nullptr, 0);
-        if (count == 0)
-        {
-            Stop(L"Tin nhắn không phải UTF-8 hợp lệ.");
-            return false;
-        }
+        int count = (int)(length / sizeof(wchar_t));
         CString text;
         wchar_t* buffer = text.GetBuffer(count);
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, (int)length, buffer, count);
+        memcpy(buffer, data, length);
         text.ReleaseBuffer(count);
         AddMessage(L"Bạn bên kia: " + text);
         offset += 4 + (size_t)length;
@@ -292,18 +287,18 @@ void CChatAppDlg::OnSend()
     GetDlgItemText(IDC_EDIT_MESSAGE, m_message);
     if (m_message.IsEmpty())
         return;
-    int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, m_message, m_message.GetLength(), nullptr, 0, nullptr, nullptr);
-    if (length <= 0 || length > INT_MAX - 1)
+    if ((size_t)m_message.GetLength() > (INT_MAX - 1) / sizeof(wchar_t))
     {
-        AfxMessageBox(L"Không mã hóa được tin nhắn.");
+        AfxMessageBox(L"Tin nhắn quá dài.");
         return;
     }
+    size_t length = (size_t)m_message.GetLength() * sizeof(wchar_t);
     try
     {
         m_pending.resize(4 + (size_t)length);
         u_long header = htonl((u_long)length);
         memcpy(&m_pending[0], &header, 4);
-        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, m_message, m_message.GetLength(), &m_pending[4], length, nullptr, nullptr);
+        memcpy(&m_pending[4], m_message.GetString(), length);
         m_sent = 0;
         GetDlgItem(IDC_BUTTON_SEND)->EnableWindow(FALSE);
         GetDlgItem(IDC_EDIT_MESSAGE)->EnableWindow(FALSE);
