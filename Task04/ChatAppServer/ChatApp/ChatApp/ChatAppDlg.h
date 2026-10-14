@@ -1,11 +1,13 @@
 ﻿#pragma once
 #include "afxdialogex.h"
+#include "Resource.h"
 #include <string>
 
 class CChatAppDlg : public CDialogEx
 {
 public:
     CChatAppDlg(CWnd* parent = nullptr);
+    enum { IDD = IDD_CHATAPP_DIALOG };
 protected:
     BOOL OnInitDialog() override;
     void OnOK() override;
