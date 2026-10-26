@@ -21,9 +21,7 @@ static bool BufferReserve(ByteBuffer& buffer, SIZE_T need)
 {
 	if (need <= buffer.capacity)
 		return true;
-	SIZE_T capacity = need;
-	if (buffer.capacity <= ((SIZE_T)-1) / 2)
-		capacity = buffer.capacity * 2;
+	SIZE_T capacity = buffer.capacity * 2;
 	if (capacity < need)
 		capacity = need;
 	if (capacity < IO_CHUNK)
@@ -44,7 +42,7 @@ static bool BufferReserve(ByteBuffer& buffer, SIZE_T need)
 
 static bool BufferAppend(ByteBuffer& buffer, const void* source, SIZE_T count)
 {
-	if (count > ((SIZE_T)-1) - buffer.size || !BufferReserve(buffer, buffer.size + count))
+	if (!BufferReserve(buffer, buffer.size + count))
 		return false;
 	CopyMemory(buffer.data + buffer.size, source, count);
 	buffer.size += count;
@@ -358,11 +356,6 @@ void CChatAppServerDlg::CloseClient(LPCWSTR text)
 		m_client = INVALID_SOCKET;
 	}
 
-	MSG message = {};
-	while (::PeekMessageW(&message, m_hWnd, WM_SOCKET, WM_SOCKET, PM_REMOVE))
-	{
-	}
-
 	BufferFree(m_received);
 	BufferFree(m_pending);
 	m_sent = 0;
@@ -425,7 +418,7 @@ LRESULT CChatAppServerDlg::OnSocket(WPARAM wParam, LPARAM lParam)
 	int event = WSAGETSELECTEVENT(lParam);
 	int error = WSAGETSELECTERROR(lParam);
 
-	if (source != INVALID_SOCKET && source == m_listen)
+	if (source == m_listen)
 	{
 		if (error != 0)
 		{
@@ -439,7 +432,7 @@ LRESULT CChatAppServerDlg::OnSocket(WPARAM wParam, LPARAM lParam)
 		return 0;
 	}
 
-	if (source == INVALID_SOCKET || source != m_client)
+	if (source != m_client)
 		return 0;
 
 	if (error != 0)
@@ -508,14 +501,7 @@ bool CChatAppServerDlg::ParseMessages()
 		}
 
 		if (m_received.size - offset - 4 < length)
-		{
-			if (!BufferReserve(m_received, offset + 4 + length))
-			{
-				CloseClient(L"Không đủ bộ nhớ để nhận tin nhắn.");
-				return false;
-			}
 			break;
-		}
 
 		SIZE_T count = length / sizeof(WCHAR);
 		WCHAR* text = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, (count + 1) * sizeof(WCHAR));
@@ -566,9 +552,7 @@ void CChatAppServerDlg::OnBnClickedButtonSend()
 
 	u_long bytes = (u_long)length * sizeof(WCHAR);
 	u_long header = htonl(bytes);
-	if (!BufferReserve(m_pending, 4 + (SIZE_T)bytes)
-		|| !BufferAppend(m_pending, &header, 4)
-		|| !BufferAppend(m_pending, m_message, bytes))
+	if (!BufferAppend(m_pending, &header, 4) || !BufferAppend(m_pending, m_message, bytes))
 	{
 		BufferFree(m_pending);
 		HeapFree(GetProcessHeap(), 0, m_message);

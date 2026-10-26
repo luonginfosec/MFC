@@ -4,9 +4,9 @@
 #include "ChatAppClientDlg.h"
 #include "afxdialogex.h"
 
-const UINT WM_SOCKET = WM_APP + 1;					
-const DWORD MAX_MESSAGE_BYTES = 0x7FFFFFFE;			
-const int IO_CHUNK = 64 * 1024;						
+const UINT WM_SOCKET = WM_APP + 1;
+const DWORD MAX_MESSAGE_BYTES = 0x7FFFFFFE;
+const int IO_CHUNK = 64 * 1024;
 
 
 #ifdef _DEBUG
@@ -59,7 +59,6 @@ static void BufferConsume(ByteBuffer& buffer, SIZE_T count)
 	buffer.size -= count;
 }
 
-// Giải phóng bộ đệm
 static void BufferFree(ByteBuffer& buffer)
 {
 	if (buffer.data != nullptr)
@@ -353,7 +352,7 @@ LRESULT CChatAppClientDlg::OnSocket(WPARAM wParam, LPARAM lParam)
 		return 0;
 	int event = WSAGETSELECTEVENT(lParam);
 	int error = WSAGETSELECTERROR(lParam);
-
+	
 	if (error != 0)
 	{
 		WCHAR text[160];
@@ -371,7 +370,7 @@ LRESULT CChatAppClientDlg::OnSocket(WPARAM wParam, LPARAM lParam)
 		Connected();
 		break;
 	case FD_READ:
-	case FD_CLOSE:		
+	case FD_CLOSE:
 		Receive();
 		break;
 	case FD_WRITE:
@@ -400,7 +399,7 @@ void CChatAppClientDlg::Receive()
 				return;
 		}
 		else if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
-			return;		
+			return;
 		else
 		{
 			if (m_received.size > 0)
@@ -425,7 +424,7 @@ bool CChatAppClientDlg::ParseMessages()
 			Stop(L"Độ dài tin nhắn không hợp lệ.");
 			return false;
 		}
-		
+
 		if (m_received.size - offset - 4 < length)
 		{
 			if (!BufferReserve(m_received, offset + 4 + length))

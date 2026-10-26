@@ -3,6 +3,7 @@
 #include "ChatApp.h"
 #include "ChatAppDlg.h"
 #include "afxdialogex.h"
+#include <Windows.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -222,9 +223,7 @@ BOOL CChatAppDlg::OnInitDialog()
     if (pSysMenu != nullptr)
     {
         CString strAboutMenu;
-        strAboutMenu.LoadString(IDS_ABOUTBOX);
-
-        if (!strAboutMenu.IsEmpty())
+        if (strAboutMenu.LoadString(IDS_ABOUTBOX) && !strAboutMenu.IsEmpty())
         {
             pSysMenu->AppendMenu(MF_SEPARATOR);
             pSysMenu->AppendMenu(MF_STRING, IDM_ABOUTBOX, strAboutMenu);

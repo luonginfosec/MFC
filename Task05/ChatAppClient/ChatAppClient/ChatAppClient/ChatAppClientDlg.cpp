@@ -4,150 +4,100 @@
 #include "ChatAppClientDlg.h"
 #include "afxdialogex.h"
 
-const UINT WM_SOCKET = WM_APP + 1;					
-const DWORD MAX_MESSAGE_BYTES = 0x7FFFFFFE;			
-const int IO_CHUNK = 64 * 1024;						
-
-
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
 
-
-static bool BufferReserve(ByteBuffer& buffer, SIZE_T need)
-{
-	if (need <= buffer.capacity)
-		return true;
-	SIZE_T capacity = need;
-	if (buffer.capacity <= ((SIZE_T)-1) / 2)
-		capacity = buffer.capacity * 2;
-	if (capacity < need)
-		capacity = need;
-	if (capacity < IO_CHUNK)
-		capacity = IO_CHUNK;
-
-	HANDLE heap = GetProcessHeap();
-	BYTE* data;
-	if (buffer.data == nullptr)
-		data = (BYTE*)HeapAlloc(heap, 0, capacity);
-	else
-		data = (BYTE*)HeapReAlloc(heap, 0, buffer.data, capacity);
-	if (data == nullptr)
-		return false;
-	buffer.data = data;
-	buffer.capacity = capacity;
-	return true;
-}
-
-static bool BufferAppend(ByteBuffer& buffer, const void* source, SIZE_T count)
-{
-	if (count > ((SIZE_T)-1) - buffer.size || !BufferReserve(buffer, buffer.size + count))
-		return false;
-	CopyMemory(buffer.data + buffer.size, source, count);
-	buffer.size += count;
-	return true;
-}
-
-static void BufferConsume(ByteBuffer& buffer, SIZE_T count)
-{
-	if (count >= buffer.size)
-	{
-		buffer.size = 0;
-		return;
-	}
-	MoveMemory(buffer.data, buffer.data + count, buffer.size - count);
-	buffer.size -= count;
-}
-
-// Giải phóng bộ đệm
-static void BufferFree(ByteBuffer& buffer)
-{
-	if (buffer.data != nullptr)
-		HeapFree(GetProcessHeap(), 0, buffer.data);
-	buffer.data = nullptr;
-	buffer.size = 0;
-	buffer.capacity = 0;
-}
-
-
-// Autorun: ghi đường dẫn exe vào HKCU\...\Run, Windows sẽ chạy app khi user đăng nhập
+const UINT WM_CHAT_RECV = WM_APP + 1;
+const UINT WM_CHAT_CLOSED = WM_APP + 2;
+const u_long MAX_MSG_BYTES = 10 * 1024 * 1024;
 const WCHAR RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const WCHAR RUN_VALUE[] = L"ChatAppClient";
 
-// Lệnh autorun = đường dẫn exe hiện tại đặt trong ngoặc kép (đường dẫn có thể chứa dấu cách)
-static bool GetAutorunCommand(WCHAR* command, DWORD size)
+struct RecvParam
 {
-	WCHAR path[MAX_PATH];
-	// https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulefilenamew
-	DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
-	if (length == 0 || length >= MAX_PATH || length + 3 > size)
-		return false;
-	wsprintfW(command, L"\"%s\"", path);
+	HWND hWnd;
+	SOCKET sock;
+};
+
+static bool SendAll(SOCKET s, const char* buf, int len)
+{
+	while (len > 0)
+	{
+		int n = send(s, buf, len, 0);
+		if (n <= 0)
+			return false;
+		buf += n;
+		len -= n;
+	}
 	return true;
 }
 
-// Đã bật autorun chưa (giá trị trong Run trỏ đúng exe đang chạy)
+static bool RecvAll(SOCKET s, char* buf, int len)
+{
+	while (len > 0)
+	{
+		int n = recv(s, buf, len, 0);
+		if (n <= 0)
+			return false;
+		buf += n;
+		len -= n;
+	}
+	return true;
+}
+
+static bool SendMsg(SOCKET s, const CString& text)
+{
+	u_long bytes = text.GetLength() * sizeof(WCHAR);
+	u_long header = htonl(bytes);
+	return SendAll(s, (const char*)&header, 4) && SendAll(s, (const char*)(LPCWSTR)text, bytes);
+}
+
+static bool RecvMsg(SOCKET s, CString& text)
+{
+	u_long header = 0;
+	if (!RecvAll(s, (char*)&header, 4))
+		return false;
+	u_long bytes = ntohl(header);
+	if (bytes == 0 || bytes > MAX_MSG_BYTES || bytes % sizeof(WCHAR) != 0)
+		return false;
+
+	int count = bytes / sizeof(WCHAR);
+	bool ok = RecvAll(s, (char*)text.GetBuffer(count), bytes);
+	text.ReleaseBuffer(ok ? count : 0);
+	return ok;
+}
+
 static bool IsAutorunEnabled()
 {
-	WCHAR command[MAX_PATH + 2];
-	WCHAR value[MAX_PATH + 2];
-	DWORD size = sizeof(value);
-	if (!GetAutorunCommand(command, _countof(command)))
-		return false;
-	// https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-reggetvaluew
-	if (RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, nullptr, value, &size) != ERROR_SUCCESS)
-		return false;
-	return lstrcmpiW(value, command) == 0;
+	return RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
 }
 
-// Bật/tắt autorun, trả về mã lỗi Win32
-static LSTATUS SetAutorun(bool enable)
+static bool SetAutorun(bool enable)
 {
-	HKEY key = nullptr;
-	// https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regcreatekeyexw
-	LSTATUS status = RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
-	if (status != ERROR_SUCCESS)
-		return status;
+	if (!enable)
+		return RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE) == ERROR_SUCCESS;
 
-	if (enable)
-	{
-		WCHAR command[MAX_PATH + 2];
-		if (!GetAutorunCommand(command, _countof(command)))
-			status = ERROR_FILENAME_EXCED_RANGE;
-		else
-			// https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regsetvalueexw
-			status = RegSetValueExW(key, RUN_VALUE, 0, REG_SZ, (const BYTE*)command,
-				(DWORD)(lstrlenW(command) + 1) * sizeof(WCHAR));
-	}
-	else
-	{
-		// https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regdeletevaluew
-		status = RegDeleteValueW(key, RUN_VALUE);
-		if (status == ERROR_FILE_NOT_FOUND)
-			status = ERROR_SUCCESS;		// Chưa đăng ký thì coi như đã tắt
-	}
-	RegCloseKey(key);
-	return status;
+	WCHAR path[MAX_PATH];
+	if (GetModuleFileNameW(nullptr, path, MAX_PATH) == 0)
+		return false;
+	CString command = L"\"" + CString(path) + L"\"";
+	return RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ,
+		(LPCWSTR)command, (command.GetLength() + 1) * sizeof(WCHAR)) == ERROR_SUCCESS;
 }
-
-
-// CAboutDlg dialog used for App About
 
 class CAboutDlg : public CDialogEx
 {
 public:
 	CAboutDlg();
 
-// Dialog Data
 #ifdef AFX_DESIGN_TIME
 	enum { IDD = IDD_ABOUTBOX };
 #endif
 
-	protected:
-	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support
-
-// Implementation
 protected:
+	virtual void DoDataExchange(CDataExchange* pDX);
+
 	DECLARE_MESSAGE_MAP()
 };
 
@@ -163,12 +113,7 @@ void CAboutDlg::DoDataExchange(CDataExchange* pDX)
 BEGIN_MESSAGE_MAP(CAboutDlg, CDialogEx)
 END_MESSAGE_MAP()
 
-
-// CChatAppClientDlg dialog
-
-
-
-CChatAppClientDlg::CChatAppClientDlg(CWnd* pParent /*=nullptr*/)
+CChatAppClientDlg::CChatAppClientDlg(CWnd* pParent)
 	: CDialogEx(IDD_CHATAPPCLIENT_DIALOG, pParent)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
@@ -183,20 +128,17 @@ BEGIN_MESSAGE_MAP(CChatAppClientDlg, CDialogEx)
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
+	ON_WM_DESTROY()
+	ON_MESSAGE(WM_CHAT_RECV, &CChatAppClientDlg::OnChatRecv)
+	ON_MESSAGE(WM_CHAT_CLOSED, &CChatAppClientDlg::OnChatClosed)
 	ON_BN_CLICKED(IDC_BUTTON_CONNECT, &CChatAppClientDlg::OnBnClickedButtonConnect)
 	ON_BN_CLICKED(IDC_BUTTON_SEND, &CChatAppClientDlg::OnBnClickedButtonSend)
 	ON_BN_CLICKED(IDC_CHECK_AUTORUN, &CChatAppClientDlg::OnBnClickedCheckAutorun)
-	ON_MESSAGE(WM_SOCKET, &CChatAppClientDlg::OnSocket)
-	ON_WM_DESTROY()
 END_MESSAGE_MAP()
-
-
-// CChatAppClientDlg message handlers
 
 BOOL CChatAppClientDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
-
 
 	ASSERT((IDM_ABOUTBOX & 0xFFF0) == IDM_ABOUTBOX);
 	ASSERT(IDM_ABOUTBOX < 0xF000);
@@ -204,10 +146,8 @@ BOOL CChatAppClientDlg::OnInitDialog()
 	CMenu* pSysMenu = GetSystemMenu(FALSE);
 	if (pSysMenu != nullptr)
 	{
-		BOOL bNameValid;
 		CString strAboutMenu;
-		bNameValid = strAboutMenu.LoadString(IDS_ABOUTBOX);
-		ASSERT(bNameValid);
+		strAboutMenu.LoadString(IDS_ABOUTBOX);
 		if (!strAboutMenu.IsEmpty())
 		{
 			pSysMenu->AppendMenu(MF_SEPARATOR);
@@ -215,31 +155,25 @@ BOOL CChatAppClientDlg::OnInitDialog()
 		}
 	}
 
-	// Set the icon for this dialog.  The framework does this automatically
-	//  when the application's main window is not a dialog
-	SetIcon(m_hIcon, TRUE);			// Set big icon
-	SetIcon(m_hIcon, FALSE);		// Set small icon
+	SetIcon(m_hIcon, TRUE);
+	SetIcon(m_hIcon, FALSE);
 
-	::SetWindowTextW(m_hWnd, L"Chat TCP - Máy khách");
-
-	::SetDlgItemTextW(m_hWnd, IDC_EDIT_IP, L"127.0.0.1");
-	::SetDlgItemTextW(m_hWnd, IDC_EDIT_PORT, L"5000");
-
-	::SendMessageW(::GetDlgItem(m_hWnd, IDC_EDIT_MESSAGE), EM_SETLIMITTEXT, 0, 0);
-	::SendMessageW(::GetDlgItem(m_hWnd, IDC_EDIT_HISTORY), EM_SETLIMITTEXT, 0, 0);
-
-	EnableItem(IDC_BUTTON_SEND, FALSE);
-	::CheckDlgButton(m_hWnd, IDC_CHECK_AUTORUN, IsAutorunEnabled() ? BST_CHECKED : BST_UNCHECKED);
-
-	WSADATA data = {};
-	m_started = WSAStartup(MAKEWORD(2, 2), &data) == 0;
-	if (!m_started)
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
 	{
-		AddMessage(L"", L"Không khởi tạo được Winsock.");
-		EnableItem(IDC_BUTTON_CONNECT, FALSE);
+		AfxMessageBox(L"Không khởi tạo được Winsock.");
+		EndDialog(IDCANCEL);
+		return TRUE;
 	}
 
-	return TRUE;  // return TRUE  unless you set the focus to a control
+	SetWindowText(L"Chat TCP - Máy khách");
+	SetDlgItemText(IDC_EDIT_IP, L"127.0.0.1");
+	SetDlgItemText(IDC_EDIT_PORT, L"9999");
+	((CEdit*)GetDlgItem(IDC_EDIT_MESSAGE))->SetLimitText(0);
+	((CEdit*)GetDlgItem(IDC_EDIT_HISTORY))->SetLimitText(0);
+	CheckDlgButton(IDC_CHECK_AUTORUN, IsAutorunEnabled() ? BST_CHECKED : BST_UNCHECKED);
+	GetDlgItem(IDC_BUTTON_SEND)->EnableWindow(FALSE);
+	return TRUE;
 }
 
 void CChatAppClientDlg::OnSysCommand(UINT nID, LPARAM lParam)
@@ -255,19 +189,14 @@ void CChatAppClientDlg::OnSysCommand(UINT nID, LPARAM lParam)
 	}
 }
 
-// If you add a minimize button to your dialog, you will need the code below
-//  to draw the icon.  For MFC applications using the document/view model,
-//  this is automatically done for you by the framework.
-
 void CChatAppClientDlg::OnPaint()
 {
 	if (IsIconic())
 	{
-		CPaintDC dc(this); // device context for painting
+		CPaintDC dc(this);
 
 		SendMessage(WM_ICONERASEBKGND, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
 
-		// Center icon in client rectangle
 		int cxIcon = GetSystemMetrics(SM_CXICON);
 		int cyIcon = GetSystemMetrics(SM_CYICON);
 		CRect rect;
@@ -275,7 +204,6 @@ void CChatAppClientDlg::OnPaint()
 		int x = (rect.Width() - cxIcon + 1) / 2;
 		int y = (rect.Height() - cyIcon + 1) / 2;
 
-		// Draw the icon
 		dc.DrawIcon(x, y, m_hIcon);
 	}
 	else
@@ -284,343 +212,145 @@ void CChatAppClientDlg::OnPaint()
 	}
 }
 
-// The system calls this function to obtain the cursor to display while the user drags
-//  the minimized window.
 HCURSOR CChatAppClientDlg::OnQueryDragIcon()
 {
 	return static_cast<HCURSOR>(m_hIcon);
 }
 
-
-void CChatAppClientDlg::EnableItem(int id, BOOL enable)
+void CChatAppClientDlg::AddMessage(const CString& text)
 {
-	::EnableWindow(::GetDlgItem(m_hWnd, id), enable);
+	CEdit* history = (CEdit*)GetDlgItem(IDC_EDIT_HISTORY);
+	int length = history->GetWindowTextLength();
+	history->SetSel(length, length);
+	history->ReplaceSel(text + L"\r\n");
 }
 
-void CChatAppClientDlg::AddMessage(LPCWSTR prefix, LPCWSTR text)
+void CChatAppClientDlg::Disconnect(const CString& text)
 {
-	HWND history = ::GetDlgItem(m_hWnd, IDC_EDIT_HISTORY);
-
-	int length = ::GetWindowTextLengthW(history);
-
-	::SendMessageW(history, EM_SETSEL, (WPARAM)length, (LPARAM)length);
-	::SendMessageW(history, EM_REPLACESEL, FALSE, (LPARAM)prefix);
-	::SendMessageW(history, EM_REPLACESEL, FALSE, (LPARAM)text);
-	::SendMessageW(history, EM_REPLACESEL, FALSE, (LPARAM)L"\r\n");
-}
-
-void CChatAppClientDlg::Stop(LPCWSTR text)
-{
-	if (m_pending.size > 0)
-		AddMessage(L"", L"Tin đang gửi chưa hoàn tất.");
-
-	if (m_socket != INVALID_SOCKET)
-	{
-		WSAAsyncSelect(m_socket, m_hWnd, 0, 0);
-		closesocket(m_socket);
-		m_socket = INVALID_SOCKET;
-	}
-
-	MSG message = {};
-	while (::PeekMessageW(&message, m_hWnd, WM_SOCKET, WM_SOCKET, PM_REMOVE))
-	{
-	}
-
-	m_connected = false;
-	BufferFree(m_received);
-	BufferFree(m_pending);
-	m_sent = 0;
-	if (m_message != nullptr)
-	{
-		HeapFree(GetProcessHeap(), 0, m_message);
-		m_message = nullptr;
-	}
-
-	if (m_hWnd == nullptr)
+	if (m_sock == INVALID_SOCKET)
 		return;
-	EnableItem(IDC_BUTTON_SEND, FALSE);
-	EnableItem(IDC_EDIT_MESSAGE, TRUE);
-	EnableItem(IDC_EDIT_IP, TRUE);
-	EnableItem(IDC_EDIT_PORT, TRUE);
-	::SetDlgItemTextW(m_hWnd, IDC_BUTTON_CONNECT, L"Kết nối");
-	if (text != nullptr && text[0] != L'\0')
-		AddMessage(L"", text);
+	closesocket(m_sock);
+	m_sock = INVALID_SOCKET;
+
+	SetDlgItemText(IDC_BUTTON_CONNECT, L"Kết nối");
+	GetDlgItem(IDC_BUTTON_SEND)->EnableWindow(FALSE);
+	GetDlgItem(IDC_EDIT_IP)->EnableWindow(TRUE);
+	GetDlgItem(IDC_EDIT_PORT)->EnableWindow(TRUE);
+	AddMessage(text);
+}
+
+UINT CChatAppClientDlg::RecvThread(LPVOID param)
+{
+	RecvParam* p = (RecvParam*)param;
+	CString text;
+	while (RecvMsg(p->sock, text))
+	{
+		CString* msg = new CString(text);
+		if (!::PostMessage(p->hWnd, WM_CHAT_RECV, (WPARAM)p->sock, (LPARAM)msg))
+			delete msg;
+	}
+	::PostMessage(p->hWnd, WM_CHAT_CLOSED, (WPARAM)p->sock, 0);
+	delete p;
+	return 0;
+}
+
+LRESULT CChatAppClientDlg::OnChatRecv(WPARAM wParam, LPARAM lParam)
+{
+	CString* msg = (CString*)lParam;
+	if ((SOCKET)wParam == m_sock)
+		AddMessage(L"Echo: " + *msg);
+	delete msg;
+	return 0;
+}
+
+LRESULT CChatAppClientDlg::OnChatClosed(WPARAM wParam, LPARAM)
+{
+	if ((SOCKET)wParam == m_sock)
+		Disconnect(L"Máy chủ đã đóng kết nối.");
+	return 0;
 }
 
 void CChatAppClientDlg::OnBnClickedButtonConnect()
 {
-	if (m_socket != INVALID_SOCKET)
+	if (m_sock != INVALID_SOCKET)
 	{
-		Stop(L"Đã ngắt kết nối.");
+		Disconnect(L"Đã ngắt kết nối.");
 		return;
 	}
 
-	BOOL valid = FALSE;
-	UINT port = ::GetDlgItemInt(m_hWnd, IDC_EDIT_PORT, &valid, FALSE);
-	if (!valid || port == 0 || port > 65535)
+	CString ip;
+	GetDlgItemText(IDC_EDIT_IP, ip);
+	UINT port = GetDlgItemInt(IDC_EDIT_PORT, nullptr, FALSE);
+	if (port == 0 || port > 65535)
 	{
-		::MessageBoxW(m_hWnd, L"Nhập cổng từ 1 đến 65535.", L"Lỗi", MB_OK | MB_ICONWARNING);
+		AfxMessageBox(L"Nhập cổng từ 1 đến 65535.");
 		return;
 	}
 
-	WCHAR ip[64] = {};
-	::GetDlgItemTextW(m_hWnd, IDC_EDIT_IP, ip, _countof(ip));
-
-	sockaddr_in address = {};
-	address.sin_family = AF_INET;
-	address.sin_port = htons((u_short)port);
-	if (InetPtonW(AF_INET, ip, &address.sin_addr) != 1)
+	sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((u_short)port);
+	if (InetPtonW(AF_INET, ip, &addr.sin_addr) != 1)
 	{
-		::MessageBoxW(m_hWnd, L"Nhập địa chỉ IPv4 của máy chủ (vd: 192.168.1.10).", L"Lỗi", MB_OK | MB_ICONWARNING);
+		AfxMessageBox(L"Địa chỉ IP không hợp lệ.");
 		return;
 	}
 
-	m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (m_socket == INVALID_SOCKET)
+	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (connect(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
 	{
-		AddMessage(L"", L"Không tạo được socket.");
+		CString e;
+		e.Format(L"Không kết nối được (mã lỗi %d).", WSAGetLastError());
+		AfxMessageBox(e);
+		closesocket(s);
 		return;
 	}
+	m_sock = s;
 
-	if (WSAAsyncSelect(m_socket, m_hWnd, WM_SOCKET, FD_CONNECT | FD_READ | FD_WRITE | FD_CLOSE) == SOCKET_ERROR)
-	{
-		Stop(L"Không đăng ký được sự kiện socket.");
-		return;
-	}
+	SetDlgItemText(IDC_BUTTON_CONNECT, L"Ngắt");
+	GetDlgItem(IDC_BUTTON_SEND)->EnableWindow(TRUE);
+	GetDlgItem(IDC_EDIT_IP)->EnableWindow(FALSE);
+	GetDlgItem(IDC_EDIT_PORT)->EnableWindow(FALSE);
+	GetDlgItem(IDC_EDIT_MESSAGE)->SetFocus();
+	AddMessage(L"Đã kết nối tới máy chủ.");
 
-	if (connect(m_socket, (sockaddr*)&address, sizeof(address)) == SOCKET_ERROR
-		&& WSAGetLastError() != WSAEWOULDBLOCK)
-	{
-		Stop(L"Không kết nối được. Kiểm tra IP, cổng và tường lửa.");
-		return;
-	}
-
-	AddMessage(L"", L"Đang kết nối...");
-	::SetDlgItemTextW(m_hWnd, IDC_BUTTON_CONNECT, L"Ngắt");
-	EnableItem(IDC_EDIT_IP, FALSE);
-	EnableItem(IDC_EDIT_PORT, FALSE);
-}
-
-void CChatAppClientDlg::Connected()
-{
-	m_connected = true;
-	EnableItem(IDC_BUTTON_SEND, TRUE);
-	AddMessage(L"", L"Đã kết nối tới máy chủ.");
-	// https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setfocus
-	::SetFocus(::GetDlgItem(m_hWnd, IDC_EDIT_MESSAGE));
-}
-
-LRESULT CChatAppClientDlg::OnSocket(WPARAM wParam, LPARAM lParam)
-{
-	if ((SOCKET)wParam != m_socket || m_socket == INVALID_SOCKET)
-		return 0;
-	int event = WSAGETSELECTEVENT(lParam);
-	int error = WSAGETSELECTERROR(lParam);
-
-	if (error != 0)
-	{
-		WCHAR text[160];
-		if (event == FD_CONNECT)
-			wsprintfW(text, L"Không kết nối được tới máy chủ (mã lỗi %d). Kiểm tra IP, cổng và tường lửa.", error);
-		else
-			wsprintfW(text, L"Mất kết nối (mã lỗi %d).", error);
-		Stop(text);
-		return 0;
-	}
-
-	switch (event)
-	{
-	case FD_CONNECT:
-		Connected();
-		break;
-	case FD_READ:
-	case FD_CLOSE:		
-		Receive();
-		break;
-	case FD_WRITE:
-		if (m_connected)
-			Flush();
-		break;
-	}
-	return 0;
-}
-
-void CChatAppClientDlg::Receive()
-{
-	char buffer[8192];
-	while (m_socket != INVALID_SOCKET)
-	{
-		// https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-recv
-		int count = recv(m_socket, buffer, sizeof(buffer), 0);
-		if (count > 0)
-		{
-			if (!BufferAppend(m_received, buffer, (SIZE_T)count))
-			{
-				Stop(L"Không đủ bộ nhớ để nhận tin nhắn.");
-				return;
-			}
-			if (!ParseMessages())
-				return;
-		}
-		else if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
-			return;		
-		else
-		{
-			if (m_received.size > 0)
-				Stop(L"Mất kết nối khi tin nhắn chưa nhận đủ.");
-			else
-				Stop(L"Máy chủ đã đóng kết nối. Bấm \"Kết nối\" để kết nối lại.");
-			return;
-		}
-	}
-}
-
-bool CChatAppClientDlg::ParseMessages()
-{
-	SIZE_T offset = 0;
-	while (m_received.size - offset >= 4)
-	{
-		u_long header = 0;
-		CopyMemory(&header, m_received.data + offset, 4);
-		u_long length = ntohl(header);
-		if (length == 0 || length > MAX_MESSAGE_BYTES || length % sizeof(WCHAR) != 0)
-		{
-			Stop(L"Độ dài tin nhắn không hợp lệ.");
-			return false;
-		}
-		
-		if (m_received.size - offset - 4 < length)
-		{
-			if (!BufferReserve(m_received, offset + 4 + length))
-			{
-				Stop(L"Không đủ bộ nhớ để nhận tin nhắn.");
-				return false;
-			}
-			break;
-		}
-
-		SIZE_T count = length / sizeof(WCHAR);
-		WCHAR* text = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, (count + 1) * sizeof(WCHAR));
-		if (text == nullptr)
-		{
-			Stop(L"Không đủ bộ nhớ để hiển thị tin nhắn.");
-			return false;
-		}
-		CopyMemory(text, m_received.data + offset + 4, length);
-		text[count] = L'\0';
-		AddMessage(L"Máy chủ: ", text);
-		HeapFree(GetProcessHeap(), 0, text);
-		offset += 4 + (SIZE_T)length;
-	}
-	BufferConsume(m_received, offset);
-	return true;
+	AfxBeginThread(RecvThread, new RecvParam{ m_hWnd, s });
 }
 
 void CChatAppClientDlg::OnBnClickedButtonSend()
 {
-	if (!m_connected || m_pending.size > 0)
+	if (m_sock == INVALID_SOCKET)
 		return;
 
-	HWND edit = ::GetDlgItem(m_hWnd, IDC_EDIT_MESSAGE);
-	int length = ::GetWindowTextLengthW(edit);
-	if (length <= 0)
+	CString text;
+	GetDlgItemText(IDC_EDIT_MESSAGE, text);
+	if (text.IsEmpty())
 		return;
-	if ((DWORD)length > MAX_MESSAGE_BYTES / sizeof(WCHAR))
+
+	if (!SendMsg(m_sock, text))
 	{
-		::MessageBoxW(m_hWnd, L"Tin nhắn quá dài.", L"Lỗi", MB_OK | MB_ICONWARNING);
+		Disconnect(L"Gửi thất bại. Kết nối đã đóng.");
 		return;
 	}
-
-	m_message = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)length + 1) * sizeof(WCHAR));
-	if (m_message == nullptr)
-	{
-		AddMessage(L"", L"Không đủ bộ nhớ để gửi tin nhắn.");
-		return;
-	}
-
-	length = ::GetWindowTextW(edit, m_message, length + 1);
-	if (length <= 0)
-	{
-		HeapFree(GetProcessHeap(), 0, m_message);
-		m_message = nullptr;
-		return;
-	}
-
-	u_long bytes = (u_long)length * sizeof(WCHAR);
-	// https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-htonl
-	u_long header = htonl(bytes);
-	if (!BufferReserve(m_pending, 4 + (SIZE_T)bytes)
-		|| !BufferAppend(m_pending, &header, 4)
-		|| !BufferAppend(m_pending, m_message, bytes))
-	{
-		BufferFree(m_pending);
-		HeapFree(GetProcessHeap(), 0, m_message);
-		m_message = nullptr;
-		AddMessage(L"", L"Không đủ bộ nhớ để gửi tin nhắn.");
-		return;
-	}
-	m_sent = 0;
-
-
-	EnableItem(IDC_BUTTON_SEND, FALSE);
-	EnableItem(IDC_EDIT_MESSAGE, FALSE);
-	Flush();
-}
-
-void CChatAppClientDlg::Flush()
-{
-	if (m_pending.size == 0)
-		return;
-
-	while (m_sent < m_pending.size)
-	{
-		SIZE_T remaining = m_pending.size - m_sent;
-		int length = IO_CHUNK;
-		if (remaining < (SIZE_T)IO_CHUNK)
-			length = (int)remaining;
-		// https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-send
-		int count = send(m_socket, (const char*)m_pending.data + m_sent, length, 0);
-		if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
-			return;
-		if (count <= 0)
-		{
-			Stop(L"Gửi thất bại. Kết nối đã đóng.");
-			return;
-		}
-		m_sent += (SIZE_T)count;
-	}
-
-	AddMessage(L"Tôi: ", m_message);
-	BufferFree(m_pending);
-	HeapFree(GetProcessHeap(), 0, m_message);
-	m_message = nullptr;
-	m_sent = 0;
-
-	::SetDlgItemTextW(m_hWnd, IDC_EDIT_MESSAGE, L"");
-	EnableItem(IDC_EDIT_MESSAGE, TRUE);
-	EnableItem(IDC_BUTTON_SEND, TRUE);
-	::SetFocus(::GetDlgItem(m_hWnd, IDC_EDIT_MESSAGE));
+	AddMessage(L"Tôi: " + text);
+	SetDlgItemText(IDC_EDIT_MESSAGE, L"");
 }
 
 void CChatAppClientDlg::OnBnClickedCheckAutorun()
 {
-	bool enable = ::IsDlgButtonChecked(m_hWnd, IDC_CHECK_AUTORUN) == BST_CHECKED;
-	LSTATUS status = SetAutorun(enable);
-	if (status != ERROR_SUCCESS)
+	bool enable = IsDlgButtonChecked(IDC_CHECK_AUTORUN) == BST_CHECKED;
+	if (!SetAutorun(enable))
 	{
-		// Ghi registry lỗi: trả checkbox về trạng thái cũ
-		::CheckDlgButton(m_hWnd, IDC_CHECK_AUTORUN, enable ? BST_UNCHECKED : BST_CHECKED);
-		WCHAR text[128];
-		wsprintfW(text, L"Không ghi được registry (mã lỗi %ld).", status);
-		::MessageBoxW(m_hWnd, text, L"Lỗi", MB_OK | MB_ICONWARNING);
+		CheckDlgButton(IDC_CHECK_AUTORUN, enable ? BST_UNCHECKED : BST_CHECKED);
+		AfxMessageBox(L"Không ghi được registry.");
 		return;
 	}
-	AddMessage(L"", enable ? L"Đã bật khởi động cùng Windows." : L"Đã tắt khởi động cùng Windows.");
+	AddMessage(enable ? L"Đã bật khởi động cùng Windows." : L"Đã tắt khởi động cùng Windows.");
 }
 
 BOOL CChatAppClientDlg::PreTranslateMessage(MSG* pMsg)
 {
-	if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_RETURN && ::GetKeyState(VK_CONTROL) < 0)
+	if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_RETURN && GetKeyState(VK_CONTROL) < 0)
 	{
 		OnBnClickedButtonSend();
 		return TRUE;
@@ -628,12 +358,14 @@ BOOL CChatAppClientDlg::PreTranslateMessage(MSG* pMsg)
 	return CDialogEx::PreTranslateMessage(pMsg);
 }
 
-
 void CChatAppClientDlg::OnDestroy()
 {
-	Stop(nullptr);
-	if (m_started)
-		WSACleanup();
+	if (m_sock != INVALID_SOCKET)
+	{
+		closesocket(m_sock);
+		m_sock = INVALID_SOCKET;
+	}
+	WSACleanup();
 	CDialogEx::OnDestroy();
 }
 
